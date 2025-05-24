@@ -20,3 +20,6 @@ go.work
 # IDEA junk
 .idea/
 
+# Build binary
+/omnivorous
+

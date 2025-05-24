@@ -9,18 +9,35 @@ import (
 	"os"
 )
 
+var (
+	Version   = "dev"
+	Commit    = "none"
+	BuildTime = "unknown"
+)
+
 func main() {
+	showVersion := flag.Bool("version", false, "Show version and exit")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("Version: %s\n", Version)
+		fmt.Printf("Commit: %s\n", Commit)
+		fmt.Printf("Build Time: %s\n", BuildTime)
+		os.Exit(0)
+	}
+
 	flag.Usage = func() {
 		fmt.Println("Usage: omnivorous [options] <url>")
 		flag.PrintDefaults()
 	}
 
-	if len(os.Args) < 2 {
+	if len(flag.Args()) < 1 {
+		fmt.Println("Error: URL is required")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	fUrl := os.Args[1]
+	fUrl := flag.Arg(0)
 
 	if fUrl == "" {
 		fmt.Println("Error: URL is required")

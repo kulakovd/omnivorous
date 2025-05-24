@@ -1,0 +1,18 @@
+# https://taskfile.dev
+
+version: '3'
+
+vars:
+  VERSION: 
+    sh: git describe --tags --always --dirty
+  COMMIT:
+    sh: git rev-parse --short HEAD
+  BUILDTIME:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+
+tasks:
+  build:
+    desc: Build the project
+    cmds:
+      - go build -o omnivorous -ldflags="-X 'main.Version={{.VERSION}}' -X 'main.Commit={{.COMMIT}}' -X 'main.BuildTime={{.BUILDTIME}}'"  cmd/omnivorous/main.go
+    silent: true
