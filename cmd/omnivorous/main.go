@@ -28,12 +28,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	flag.CommandLine.Parse(os.Args[2:])
+	err := flag.CommandLine.Parse(os.Args[2:])
+	if err != nil {
+		flag.Usage()
+		os.Exit(1)
+	}
 
 	// parse the URL
 	parsedUrl, err := url.Parse(fUrl)
 	if err != nil {
 		fmt.Println("Error: Invalid URL")
+		flag.Usage()
 		os.Exit(1)
 	}
 

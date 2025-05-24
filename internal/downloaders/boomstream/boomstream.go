@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/schollz/progressbar/v3"
 	"io"
@@ -86,7 +85,7 @@ func Download(ctx context.Context, url *url.URL) error {
 		progressbar.OptionSetRenderBlankState(true),
 	)
 
-	err := d.getConfig(url)
+	err := d.getConfig(ctx, url)
 	if err != nil {
 		return fmt.Errorf("error getting config: %w", err)
 	}
@@ -103,19 +102,19 @@ func Download(ctx context.Context, url *url.URL) error {
 		return fmt.Errorf("error decoding playlist URL: %w", err)
 	}
 
-	master, err := d.getPlaylist(decodedPlaylistUrl)
+	master, err := d.getPlaylist(ctx, decodedPlaylistUrl)
 	if err != nil {
 		return fmt.Errorf("error getting master playlist: %w", err)
 	}
 
 	selectedStream := master.GetBestResolutionStream()
 
-	d.chunklist, err = d.getPlaylist(selectedStream.Url)
+	d.chunklist, err = d.getPlaylist(ctx, selectedStream.Url)
 	if err != nil {
 		return fmt.Errorf("error getting chunklist: %w", err)
 	}
 
-	err = d.getDecryptionKey(decodedToken)
+	err = d.getDecryptionKey(ctx, decodedToken)
 	if err != nil {
 		return fmt.Errorf("error getting decryption key: %w", err)
 	}
@@ -171,6 +170,7 @@ func (d *downloader) downloadSegments(ctx context.Context, bar *progressbar.Prog
 	defer cancel()
 
 	fileList := make([]string, len(d.chunklist.Segments))
+	fileListMutex := sync.Mutex{}
 
 	sem := make(chan struct{}, maxSimultaneousDownloads)
 	var wg sync.WaitGroup
@@ -181,7 +181,7 @@ func (d *downloader) downloadSegments(ctx context.Context, bar *progressbar.Prog
 		wg.Add(1)
 		sem <- struct{}{}
 
-		go func() {
+		go func(i int, segment m3u8.Segment) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
@@ -195,8 +195,11 @@ func (d *downloader) downloadSegments(ctx context.Context, bar *progressbar.Prog
 			}
 
 			bar.Add(1)
+
+			fileListMutex.Lock()
 			fileList[i] = filename
-		}()
+			fileListMutex.Unlock()
+		}(i, segment)
 	}
 
 	go func() {
@@ -214,13 +217,21 @@ func (d *downloader) downloadSegments(ctx context.Context, bar *progressbar.Prog
 func downloadSegment(ctx context.Context, segment m3u8.Segment, dir string, iv, key []byte) (string, error) {
 	select {
 	case <-ctx.Done():
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return "", nil
-		}
+		return "", nil
 	default:
 	}
 
-	resp, err := getReq(segment.Url)
+	segmentUrl, err := url.Parse(segment.Url)
+	if err != nil {
+		return "", fmt.Errorf("error parsing segment URL: %w", err)
+	}
+
+	filename := filepath.Join(dir, path.Base(segmentUrl.Path))
+	if _, err := os.Stat(filename); err == nil {
+		return filename, nil // Already downloaded
+	}
+
+	resp, err := getReq(ctx, segment.Url)
 	if err != nil {
 		return "", fmt.Errorf("error downloading segment: %w", err)
 	}
@@ -232,15 +243,9 @@ func downloadSegment(ctx context.Context, segment m3u8.Segment, dir string, iv, 
 	}
 
 	decrSegment, err := aes128cbcDecrypt(encSegment, key, iv)
-
-	segmentUrl, err := url.Parse(segment.Url)
 	if err != nil {
-		return "", fmt.Errorf("error parsing segment URL: %w", err)
+		return "", fmt.Errorf("error decrypting segment: %w", err)
 	}
-
-	filename := filepath.Join(dir, path.Base(segmentUrl.Path))
-
-	// TODO check if file exists and skip download
 
 	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
@@ -278,7 +283,7 @@ func generateFfmpegInputFile(fileList []string, dir string) (string, error) {
 	return filename, nil
 }
 
-func (d *downloader) getConfig(url *url.URL) error {
+func (d *downloader) getConfig(ctx context.Context, url *url.URL) error {
 	configUrl := urlutils.Clone(url)
 	configUrl.Path = configUrl.Path + "/config"
 
@@ -287,7 +292,7 @@ func (d *downloader) getConfig(url *url.URL) error {
 
 	configUrl.RawQuery = query.Encode()
 
-	resp, err := getReq(configUrl.String())
+	resp, err := getReq(ctx, configUrl.String())
 	if err != nil {
 		return fmt.Errorf("error getting config: %w", err)
 	}
@@ -303,9 +308,9 @@ func (d *downloader) getConfig(url *url.URL) error {
 	return nil
 }
 
-func (d *downloader) getPlaylist(url string) (*m3u8.Playlist, error) {
+func (d *downloader) getPlaylist(ctx context.Context, url string) (*m3u8.Playlist, error) {
 	// get the master playlist
-	resp, err := getReq(url)
+	resp, err := getReq(ctx, url)
 	if err != nil {
 		return nil, fmt.Errorf("error getting master playlist: %w", err)
 	}
@@ -324,7 +329,7 @@ func (d *downloader) getPlaylist(url string) (*m3u8.Playlist, error) {
 	return playlist, nil
 }
 
-func (d *downloader) getDecryptionKey(token string) error {
+func (d *downloader) getDecryptionKey(ctx context.Context, token string) error {
 	xMediaReady, ok := d.chunklist.Rest["#EXT-X-MEDIA-READY"]
 	if !ok {
 		return fmt.Errorf("cannot find #EXT-X-MEDIA-READY in chunklist")
@@ -336,7 +341,7 @@ func (d *downloader) getDecryptionKey(token string) error {
 	}
 
 	keyUrl := "https://play.boomstream.com/api/process/" + xorEncrypt(decrMediaReady[0:20]+token, xorKey)
-	keyResp, err := getReq(keyUrl)
+	keyResp, err := getReq(ctx, keyUrl)
 	if err != nil {
 		return fmt.Errorf("error getting key: %w", err)
 	}
@@ -420,8 +425,8 @@ func decodeString(input string) (string, error) {
 	return string(decodedBytes), nil
 }
 
-func getReq(url string) (*http.Response, error) {
-	req, err := http.NewRequest("GET", url, nil)
+func getReq(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		panic(err)
 	}
